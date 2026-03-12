@@ -116,7 +116,7 @@ class SignalingClient:
         while True:
             try:
                 message = await self.websocket.recv()
-                print(f"📩 Raw message received: {message}")
+                print(f"--> Raw message received: {message}")
 
                 data = json.loads(message)
 
@@ -124,15 +124,15 @@ class SignalingClient:
                 if data.get("type") == "scene_request":
                     scene_text = data.get("data", {}).get("scene_text", "")
                     sender = data.get("from", "unknown")
-                    print(f"🎯 Scene request from {sender}: {scene_text}")
+                    print(f"--> Scene request from {sender}: {scene_text}")
 
-                    print(f"🤖 Asking Ollama ({OLLAMA_MODEL})...")
+                    print(f"--> Asking Ollama ({OLLAMA_MODEL})...")
                     try:
                         description = ask_ollama(scene_text)
-                        print(f"✅ Ollama response: {description}")
+                        print(f"--> Ollama response: {description}")
                     except Exception as e:
                         description = f"Error calling Ollama: {e}"
-                        print(f"❌ {description}")
+                        print(f"--> {description}")
 
                     # Send response back through signaling server
                     await self.send({
@@ -149,13 +149,13 @@ class SignalingClient:
                 print("⚠ Connection to server lost.")
                 break
             except json.JSONDecodeError:
-                print("❌ Could not parse JSON.")
+                print("-->  Could not parse JSON.")
 
     async def close(self):
         """Close the websocket connection."""
         if self.websocket:
             await self.websocket.close()
-            print("🔒 Connection closed.")
+            print("--> Connection closed.")
 
 
 # ── Standalone usage ──
@@ -176,10 +176,10 @@ async def main():
         test_scene = "Detected: person (ahead of you, nearby), car (to your left, in the distance)"
         try:
             response = ask_ollama(test_scene)
-            print(f"✅ Ollama works! Response: {response}\n")
+            print(f"--> Ollama works! Response: {response}\n")
         except Exception as e:
-            print(f"❌ Ollama is not reachable: {e}")
-            print(f"   Make sure Ollama is running: curl {OLLAMA_HOST}/api/tags")
+            print(f"--> Ollama is not reachable: {e}")
+            print(f"--> Make sure Ollama is running: curl {OLLAMA_HOST}/api/tags")
             print("   Exiting.\n")
             return
 
@@ -187,10 +187,10 @@ async def main():
     try:
         await client.connect()
     except Exception as e:
-        print(f"❌ Could not connect to signaling server: {e}")
+        print(f"--> Could not connect to signaling server: {e}")
         return
 
-    print("\n🟢 Ready — waiting for scene_request messages...\n")
+    print("\n-->  Ready — waiting for scene_request messages...\n")
 
     # Step 3: Listen for scene_requests, call Ollama, send responses
     await client.listen()
