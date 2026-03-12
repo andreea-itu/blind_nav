@@ -1,0 +1,15 @@
+# Model weights (large binary files)
+# models/*.pt
+
+# Training output
+runs/
+
+# Datasets (too large for git)
+roboflow/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# OS files
+.DS_Store
