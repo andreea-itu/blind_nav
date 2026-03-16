@@ -118,6 +118,11 @@ class SignalingClient:
         while True:
             try:
                 message = await self.websocket.recv()
+
+                # Skip binary messages (e.g JPEG frames broadcast by signaling server)
+                if isinstance(message, bytes):
+                    continue
+
                 print(f"📩 Raw message received: {message}")
 
                 data = json.loads(message)
