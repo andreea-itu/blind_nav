@@ -59,9 +59,10 @@ llm_thread = None                       # Track the current LLM background threa
 last_description_time = time.time()
 
 # How many seconds to wait between LLM calls.
-# Calling every frame would flood the server; 5 seconds is a good balance
-# between responsiveness and not overloading the Anydesk server.
-description_interval = 5
+# Calling every frame would flood the server; 8 seconds gives Ollama
+# enough time to finish and Piper enough time to speak the result
+# before the next request is queued.
+description_interval = 8
 
 # ── WebSocket Connection (Background Event Loop) ──#
 
@@ -134,9 +135,9 @@ def call_llm(scene_text):
             client.websocket.recv(),
             ws_loop
         )
-        # Wait up to 30 seconds for Ollama to generate a response.
-        # Mistral can take a few seconds depending on server load.
-        raw_response = recv_future.result(timeout=30)
+        # Wait up to 15 seconds for Ollama to generate a response.
+        # If it takes longer, we skip this reply — the next cycle will try again.
+        raw_response = recv_future.result(timeout=15)
 
         import json
         data = json.loads(raw_response)
