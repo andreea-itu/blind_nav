@@ -216,8 +216,8 @@ assignment/
 ├── run.py                        ← Entry point: poetry run python run.py
 ├── .gitignore                    ← Ignores weights, datasets, caches
 │
-├── blind_nav/                    ← Runtime application package
-│   ├── __init__.py               ← Makes blind_nav a Python package
+├── blind/                    ← Runtime application package
+│   ├── __init__.py               ← Makes blind a Python package
 │   ├── detector.py               ← Main loop: camera → YOLO → WebSocket → TTS
 │   ├── scene_builder.py          ← Converts YOLO detections → human-readable text
 │   └── speaker.py                ← Text-to-speech via spd-say (Linux)

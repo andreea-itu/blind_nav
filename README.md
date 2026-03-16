@@ -44,7 +44,7 @@ blind/
 ├── .gitignore
 ├── README.md
 │
-├── blind_nav/                    ← Core application package
+├── blind/                    ← Core application package
 │   ├── __init__.py
 │   ├── detector.py               ← Main loop: camera → YOLO → WebSocket → TTS
 │   ├── scene_builder.py          ← Converts detections → human-readable text
