@@ -67,9 +67,10 @@ def ask_ollama(scene_text: str) -> str:
 class SignalingClient:
     """Combined send/receive client for the EHB signaling server."""
 
-    def __init__(self, server_uri=SIGNALING_SERVER, client_name="client1"):
+    def __init__(self, server_uri=SIGNALING_SERVER, client_name="client1", token=None):
         self.server_uri = server_uri
         self.client_name = client_name
+        self.token = token
         self.websocket = None
         self.message_handler = on_message_received
 
@@ -79,20 +80,24 @@ class SignalingClient:
 
         print(f"🔌 Connecting to signaling server ({self.server_uri})...")
 
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/121.0.0.0 Safari/537.36"
+            ),
+        }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+
         self.websocket = await websockets.connect(
             self.server_uri,
             ssl=ssl_context,
-            origin="https://signaling.ehb.be",
+            origin="http://localhost",
             compression=None,
-            additional_headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (X11; Linux x86_64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/121.0.0.0 Safari/537.36"
-                )
-            },
+            additional_headers=headers,
         )
-        print(f"Connected to signaling server ({self.server_uri})")
+        print(f"✅ Connected to signaling server ({self.server_uri})")
 
     async def send(self, data: dict):
         """Send a JSON message through the websocket."""
@@ -118,11 +123,6 @@ class SignalingClient:
         while True:
             try:
                 message = await self.websocket.recv()
-
-                # Skip binary messages (e.g JPEG frames broadcast by signaling server)
-                if isinstance(message, bytes):
-                    continue
-
                 print(f"📩 Raw message received: {message}")
 
                 data = json.loads(message)
@@ -166,17 +166,31 @@ class SignalingClient:
 
 
 # ── Standalone usage ──
-# Run on Anydesk:  python signaling_client.py
+# Run on Anydesk:  python signaling_client.py --token YOUR_BEARER_TOKEN
 #   → Tests Ollama locally, then listens for scene_requests via websocket
-# Run on Anydesk (listen only, skip Ollama test):  python signaling_client.py --skip-test
+# Run on Anydesk (listen only, skip Ollama test):  python signaling_client.py --skip-test --token YOUR_BEARER_TOKEN
+
+DEFAULT_ROOM = "/ws/pathnavigation"
+DEFAULT_TOKEN = "B6zifTK3JWeH6E2tThPKLMwxt0QdqXVJ76GHfq7kTvs"
 
 async def main():
-    skip_test = "--skip-test" in sys.argv
+    import argparse
+    parser = argparse.ArgumentParser(description="Signaling client with Ollama integration")
+    parser.add_argument("--token", default=DEFAULT_TOKEN, help="Bearer token for authentication")
+    parser.add_argument("--room", default=DEFAULT_ROOM, help=f"Room path (default: {DEFAULT_ROOM})")
+    parser.add_argument("--skip-test", action="store_true", help="Skip local Ollama test")
+    args = parser.parse_args()
 
-    client = SignalingClient(client_name="anydesk_worker")
+    server_uri = SIGNALING_SERVER.rstrip("/") + args.room
+
+    client = SignalingClient(
+        server_uri=server_uri,
+        client_name="anydesk_worker",
+        token=args.token,
+    )
 
     # Step 1: Test Ollama locally before going online
-    if not skip_test:
+    if not args.skip_test:
         print("=" * 50)
         print("Testing Ollama locally before starting...")
         print("=" * 50)
@@ -204,5 +218,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    import sys
     asyncio.run(main())
