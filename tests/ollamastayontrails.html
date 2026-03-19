@@ -1,0 +1,1305 @@
+<!doctype html>
+<html lang="en">
+<!--
+  teststayontrails2.html
+  ──────────────────────
+  Replaces the entire web_receiver.py laptop process.
+  Everything runs in-browser EXCEPT the LLM (Ollama on Anydesk server).
+
+  Pipeline:
+    Camera → ONNX YOLO (COCO + custom) in browser → scene_builder (JS)
+    → scene_request via WebSocket → Ollama (Anydesk) → scene_response
+    → Browser speechSynthesis TTS
+
+  Usage:
+    cd blind_nav
+    python3 -m http.server 8080
+    Open http://localhost:8080/tests/teststayontrails2.html
+-->
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Stay On Trails v2 - Browser AI</title>
+    <style>
+        :root {
+            --focus: #22d3ee;
+            --menu-bg: rgba(15, 23, 42, .9);
+            --menu-border: rgba(255, 255, 255, .2);
+            --accent: #facc15;
+            --accent-ink: #111827
+        }
+
+        html,
+        body {
+            margin: 0;
+            height: 100%;
+            background: #000;
+            color: #fff;
+            font-family: Arial, Helvetica, sans-serif
+        }
+
+        .skip-link {
+            position: absolute;
+            left: 8px;
+            top: -48px;
+            z-index: 5;
+            background: var(--accent);
+            color: var(--accent-ink);
+            padding: 8px 10px;
+            border-radius: 8px;
+            font-weight: 700;
+            text-decoration: none
+        }
+
+        .skip-link:focus {
+            top: 8px
+        }
+
+        a:focus-visible,
+        button:focus-visible {
+            outline: 3px solid var(--focus);
+            outline-offset: 3px
+        }
+
+        .topbar {
+            position: relative;
+            z-index: 3;
+            background: var(--menu-bg);
+            border-bottom: 1px solid var(--menu-border)
+        }
+
+        .topbar-inner {
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 10px 14px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px
+        }
+
+        .brand {
+            margin: 0;
+            font-size: 18px;
+            font-weight: 700
+        }
+
+        .menu {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap
+        }
+
+        .menu a {
+            display: inline-block;
+            color: #fff;
+            text-decoration: none;
+            font-weight: 700;
+            padding: 7px 10px;
+            border-radius: 8px
+        }
+
+        .menu a:hover {
+            background: rgba(255, 255, 255, .12)
+        }
+
+        .menu .cta {
+            background: var(--accent);
+            color: var(--accent-ink)
+        }
+
+        .menu .cta:hover {
+            background: #fde047
+        }
+
+        .wrap {
+            position: relative;
+            z-index: 2;
+            min-height: calc(100% - 56px);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 14px;
+            padding: 16px;
+            box-sizing: border-box
+        }
+
+        .big {
+            font-size: 28px;
+            font-weight: 700
+        }
+
+        .row {
+            opacity: .9
+        }
+
+        .compassWrap {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 6px
+        }
+
+        #compass {
+            width: 140px;
+            height: 140px;
+            display: block
+        }
+
+        .panel {
+            background: rgba(0, 0, 0, .45);
+            backdrop-filter: blur(3px);
+            padding: 14px 16px;
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, .15);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px
+        }
+
+        .help {
+            max-width: 42ch;
+            text-align: center;
+            font-size: 14px;
+            line-height: 1.45;
+            color: #e2e8f0
+        }
+
+        .help a {
+            color: #93c5fd
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap
+        }
+
+        button,
+        select {
+            padding: 10px 14px;
+            border-radius: 10px;
+            border: 0;
+            background: #222;
+            color: #fff;
+            font-size: 14px
+        }
+
+        .fpsControl {
+            display: flex;
+            align-items: center;
+            gap: 8px
+        }
+
+        .modelControl {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            align-items: flex-start
+        }
+
+        .modelOptions {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap
+        }
+
+        .modelOptions label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 14px
+        }
+
+        .modelOptions input {
+            margin: 0
+        }
+
+        #video {
+            position: fixed;
+            inset: 0;
+            width: 100vw;
+            height: 100vh;
+            object-fit: cover;
+            z-index: 0;
+            background: #000
+        }
+
+        #cap {
+            display: none;
+        }
+
+        #detectionOverlay {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            z-index: 4;
+            background: rgba(0, 0, 0, .7);
+            backdrop-filter: blur(4px);
+            padding: 10px 16px;
+            font-size: 13px;
+            line-height: 1.5;
+            max-height: 30vh;
+            overflow-y: auto;
+            display: none;
+        }
+
+        #detectionOverlay .scene-text {
+            color: #22d3ee;
+            font-weight: 600;
+        }
+
+        #detectionOverlay .llm-text {
+            color: #facc15;
+            font-weight: 600;
+            margin-top: 4px;
+        }
+
+        #detectionOverlay .det-label {
+            color: #94a3b8;
+        }
+
+        #detectionOverlay .timing {
+            color: #64748b;
+            font-size: 11px;
+        }
+    </style>
+</head>
+
+<body>
+    <a href="#main-content" class="skip-link">Skip to main content</a>
+    <header class="topbar">
+        <div class="topbar-inner">
+            <p class="brand">Stay On Trails <small style="color:#94a3b8;font-weight:400">v2 — Browser AI</small></p>
+            <nav aria-label="Main menu">
+                <ul class="menu">
+                    <li><a href="index.php">Home</a></li>
+                    <li><a class="cta" href="stayontrails.php" aria-current="page">Try it</a></li>
+                </ul>
+            </nav>
+        </div>
+    </header>
+    <main id="main-content">
+        <div class="wrap">
+            <div class="panel">
+                <p class="help">
+                    <b>v2 — All detection runs in your browser.</b><br>
+                    No laptop server needed. Only the LLM (Ollama) runs remotely.<br>
+                    Mobile test: open
+                    <a href="https://youtu.be/gdL35MJxmQA?si=4eEKiPXg0HmggHmf">this YouTube video</a>,
+                    press Start, and point your phone camera at the video for audio path guidance.
+                </p>
+                <div class="big" id="status">Loading ONNX models…</div>
+                <div class="row">Frames processed: <span id="sent">0</span> &nbsp; Inference: <span
+                        id="inferenceTime">--</span> ms</div>
+                <div class="row">Errors: <span id="errs">0</span></div>
+                <div class="row">LLM latency: <span id="latency">--</span> ms</div>
+                <fieldset class="modelControl">
+                    <legend>Model</legend>
+                    <div class="modelOptions">
+                        <label>
+                            <input type="radio" name="modelSelect" value="1" checked />
+                            1: Simulation
+                        </label>
+                        <label>
+                            <input type="radio" name="modelSelect" value="2" />
+                            2: Laerbeekbos (Brussels)
+                        </label>
+                        <input type="radio" name="modelSelect" value="3" />
+                        3: Kaai (Ehb)
+                    </div>
+                </fieldset>
+                <div class="compassWrap">
+                    <canvas id="compass" width="140" height="140"></canvas>
+                    <div class="row">Heading: <span id="heading">--</span>&deg;</div>
+                </div>
+                <div class="controls">
+                    <button id="btn" disabled>Start</button>
+                    <button id="switchCam" disabled>Switch Camera</button>
+                    <label class="fpsControl" for="fpsSelect">
+                        FPS
+                        <select id="fpsSelect">
+                            <option value="1">1</option>
+                            <option value="2" selected>2</option>
+                            <option value="3">3</option>
+                            <option value="4">4</option>
+                            <option value="5">5</option>
+                            <option value="6">6</option>
+                            <option value="7">7</option>
+                            <option value="8">8</option>
+                            <option value="9">9</option>
+                            <option value="10">10</option>
+                        </select>
+                    </label>
+                    <label class="fpsControl" for="forwardDegSelect">
+                        Forward (deg)
+                        <select id="forwardDegSelect">
+                            <option value="8" selected>8</option>
+                            <option value="9">9</option>
+                            <option value="10">10</option>
+                            <option value="11">11</option>
+                            <option value="12">12</option>
+                            <option value="13">13</option>
+                            <option value="14">14</option>
+                            <option value="15">15</option>
+                            <option value="16">16</option>
+                        </select>
+                    </label>
+                    <label class="fpsControl" for="detectionConfidenceSelect">
+                        Detection confidence
+                        <select id="detectionConfidenceSelect">
+                            <option value="0.1">0.1</option>
+                            <option value="0.2">0.2</option>
+                            <option value="0.3">0.3</option>
+                            <option value="0.4">0.4</option>
+                            <option value="0.5" selected>0.5</option>
+                            <option value="0.6">0.6</option>
+                            <option value="0.7">0.7</option>
+                            <option value="0.8">0.8</option>
+                            <option value="0.9">0.9</option>
+                        </select>
+                    </label>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <video id="video" autoplay playsinline></video>
+    <canvas id="cap"></canvas>
+
+    <!-- Detection overlay at the bottom of the screen -->
+    <div id="detectionOverlay"></div>
+
+    <!-- onnxruntime-web from CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.min.js"></script>
+
+    <script>
+        (() => {
+            // ═══════════════════════════════════════════════════════════════
+            //  CONFIGURATION
+            // ═══════════════════════════════════════════════════════════════
+
+            const SIGNALING_SERVER = "wss://signaling.ehb.be/ws/pathnavigation";
+            const BEARER_TOKEN = "B6zifTK3JWeH6E2tThPKLMwxt0QdqXVJ76GHfq7kTvs";
+
+            const TARGET_W = 640, TARGET_H = 480;
+            const MODEL_W = 640, MODEL_H = 640;
+            const NMS_IOU_THRESHOLD = 0.45;
+
+            // How often (seconds) to send a scene description to the LLM
+            const DESCRIPTION_INTERVAL = 8;
+
+            // COCO 80 class names (same order as ultralytics yolov8n)
+            const COCO_NAMES = [
+                "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
+                "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
+                "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack",
+                "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball",
+                "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket",
+                "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+                "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
+                "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse",
+                "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
+                "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
+            ];
+
+            // Custom model class names (from best.pt export)
+            const CUSTOM_NAMES = ["puddle", "Fence", "Fence Anomaly", "stairs", "up_steps", "down_steps"];
+
+            // ═══════════════════════════════════════════════════════════════
+            //  DOM REFERENCES
+            // ═══════════════════════════════════════════════════════════════
+
+            const statusEl = document.getElementById("status");
+            const sentEl = document.getElementById("sent");
+            const inferenceTimeEl = document.getElementById("inferenceTime");
+            const errsEl = document.getElementById("errs");
+            const latencyEl = document.getElementById("latency");
+            const headingEl = document.getElementById("heading");
+            const btn = document.getElementById("btn");
+            const switchCamBtn = document.getElementById("switchCam");
+            const fpsSelect = document.getElementById("fpsSelect");
+            const forwardDegSelect = document.getElementById("forwardDegSelect");
+            const detectionConfidenceSelect = document.getElementById("detectionConfidenceSelect");
+            const modelInputs = document.querySelectorAll('input[name="modelSelect"]');
+            const detectionOverlay = document.getElementById("detectionOverlay");
+
+            const video = document.getElementById("video");
+            const cap = document.getElementById("cap");
+            const ctx = cap.getContext("2d", { alpha: false });
+            const compass = document.getElementById("compass");
+            const compCtx = compass.getContext("2d");
+
+            // ═══════════════════════════════════════════════════════════════
+            //  STATE
+            // ═══════════════════════════════════════════════════════════════
+
+            // ONNX sessions
+            let cocoSession = null;
+            let customSession = null;
+            let modelsReady = false;
+
+            // Camera / streaming
+            let stream = null;
+            let activeVideoDeviceId = null;
+            let availableVideoInputs = [];
+            let timer = null;
+            let processedFrames = 0;
+            let errors = 0;
+            let isProcessing = false; // prevent overlapping inference
+
+            // WebSocket (for LLM only)
+            let ws = null;
+            let currentSessionId = null;
+
+            // Heading / compass
+            let latestHeading = null;
+            let targetHeading = null;
+
+            // Geolocation
+            let geoWatchId = null;
+            let latestLatitude = null;
+            let latestLongitude = null;
+
+            // Settings
+            let fps = Number(fpsSelect?.value) || 2;
+            let forwardDeg = Number(forwardDegSelect?.value) || 8;
+            let detectionConfidence = Number(detectionConfidenceSelect?.value) || 0.5;
+
+            // LLM throttle
+            let lastDescriptionTime = 0;
+            let pendingLLMRequest = false;
+            let lastLLMSentAt = 0;
+
+            // TTS
+            let lastSpokenText = null;
+            let lastSpeakTime = 0;
+
+            // Audio (heading-based navigation sounds)
+            const SOUND_MAP = {
+                left: "audio/left.mp3",
+                right: "audio/right.mp3",
+                forward: "audio/forward.mp3",
+                started: "audio/application_started.mp3",
+                be_carefull: "audio/be_carefull.mp3",
+                beep: "audio/beep.wav"
+            };
+
+            const player = new Audio();
+            player.preload = "auto";
+
+            const preloaded = {};
+            for (const [k, url] of Object.entries(SOUND_MAP)) {
+                const a = new Audio(url);
+                a.preload = "auto";
+                preloaded[k] = a;
+            }
+
+            let audioEnabled = false;
+            let lastCmd = null;
+            let lastCmdAt = 0;
+            let noDetectionSince = null;
+            let noDetectionWarned = false;
+
+            const COOLDOWN_MS = 5000;
+
+            // ═══════════════════════════════════════════════════════════════
+            //  ONNX MODEL LOADING
+            // ═══════════════════════════════════════════════════════════════
+
+            async function loadModels() {
+                statusEl.textContent = "Loading ONNX models (≈24 MB) …";
+
+                ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/";
+                const opts = { executionProviders: ["wasm"] };
+
+                try {
+                    const [coco, custom] = await Promise.all([
+                        ort.InferenceSession.create("../models/yolov8n.onnx", opts),
+                        ort.InferenceSession.create("../models/best.onnx", opts),
+                    ]);
+
+                    cocoSession = coco;
+                    customSession = custom;
+                    modelsReady = true;
+
+                    statusEl.textContent = "Models loaded ✓ — press Start";
+                    btn.disabled = false;
+                    console.log("ONNX models loaded successfully.");
+                } catch (e) {
+                    statusEl.textContent = `Model load error: ${e.message}`;
+                    console.error("Failed to load ONNX models:", e);
+                }
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            //  YOLO PREPROCESSING — Image/Canvas → Float32 Tensor [1,3,640,640]
+            // ═══════════════════════════════════════════════════════════════
+
+            // Reusable offscreen canvas for preprocessing (avoids GC churn)
+            const ppCanvas = document.createElement("canvas");
+            ppCanvas.width = MODEL_W;
+            ppCanvas.height = MODEL_H;
+            const ppCtx = ppCanvas.getContext("2d", { willReadFrequently: true });
+
+            function canvasToTensor(srcCanvas) {
+                // Letterbox: scale while keeping aspect ratio, pad with grey (114)
+                const srcW = srcCanvas.width;
+                const srcH = srcCanvas.height;
+                const scale = Math.min(MODEL_W / srcW, MODEL_H / srcH);
+                const nw = Math.round(srcW * scale);
+                const nh = Math.round(srcH * scale);
+                const dx = Math.round((MODEL_W - nw) / 2);
+                const dy = Math.round((MODEL_H - nh) / 2);
+
+                ppCtx.fillStyle = "rgb(114,114,114)";
+                ppCtx.fillRect(0, 0, MODEL_W, MODEL_H);
+                ppCtx.drawImage(srcCanvas, 0, 0, srcW, srcH, dx, dy, nw, nh);
+
+                const imageData = ppCtx.getImageData(0, 0, MODEL_W, MODEL_H);
+                const { data } = imageData;
+
+                // Convert RGBA → CHW float32 normalised to [0,1]
+                const float32 = new Float32Array(3 * MODEL_W * MODEL_H);
+                const hw = MODEL_W * MODEL_H;
+                for (let i = 0; i < hw; i++) {
+                    float32[i] = data[i * 4] / 255; // R
+                    float32[hw + i] = data[i * 4 + 1] / 255; // G
+                    float32[2 * hw + i] = data[i * 4 + 2] / 255; // B
+                }
+
+                return {
+                    tensor: new ort.Tensor("float32", float32, [1, 3, MODEL_H, MODEL_W]),
+                    scale, dx, dy, origW: srcW, origH: srcH,
+                };
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            //  YOLO INFERENCE
+            // ═══════════════════════════════════════════════════════════════
+
+            async function runModel(session, tensor) {
+                const feeds = { images: tensor };
+                const results = await session.run(feeds);
+                return results.output0.data; // Float32Array
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            //  YOLO POST-PROCESSING (NMS)
+            // ═══════════════════════════════════════════════════════════════
+
+            function postProcess(rawOutput, numClasses, classNames, conf, meta, color) {
+                const numAnchors = 8400;
+                const boxes = [];
+
+                for (let a = 0; a < numAnchors; a++) {
+                    let bestClass = 0;
+                    let bestConf = 0;
+                    for (let c = 0; c < numClasses; c++) {
+                        const v = rawOutput[(4 + c) * numAnchors + a];
+                        if (v > bestConf) { bestConf = v; bestClass = c; }
+                    }
+                    if (bestConf < conf) continue;
+
+                    const cx = rawOutput[0 * numAnchors + a];
+                    const cy = rawOutput[1 * numAnchors + a];
+                    const w = rawOutput[2 * numAnchors + a];
+                    const h = rawOutput[3 * numAnchors + a];
+
+                    // Convert from model-space (640×640 letterboxed) → original image coords
+                    const x1 = (cx - w / 2 - meta.dx) / meta.scale;
+                    const y1 = (cy - h / 2 - meta.dy) / meta.scale;
+                    const x2 = (cx + w / 2 - meta.dx) / meta.scale;
+                    const y2 = (cy + h / 2 - meta.dy) / meta.scale;
+
+                    boxes.push({ x1, y1, x2, y2, conf: bestConf, classId: bestClass, label: classNames[bestClass], color });
+                }
+
+                return nms(boxes, NMS_IOU_THRESHOLD);
+            }
+
+            function iou(a, b) {
+                const ix1 = Math.max(a.x1, b.x1);
+                const iy1 = Math.max(a.y1, b.y1);
+                const ix2 = Math.min(a.x2, b.x2);
+                const iy2 = Math.min(a.y2, b.y2);
+                const inter = Math.max(0, ix2 - ix1) * Math.max(0, iy2 - iy1);
+                const areaA = (a.x2 - a.x1) * (a.y2 - a.y1);
+                const areaB = (b.x2 - b.x1) * (b.y2 - b.y1);
+                return inter / (areaA + areaB - inter + 1e-6);
+            }
+
+            function nms(boxes, iouThresh) {
+                boxes.sort((a, b) => b.conf - a.conf);
+                const keep = [];
+                const suppressed = new Set();
+                for (let i = 0; i < boxes.length; i++) {
+                    if (suppressed.has(i)) continue;
+                    keep.push(boxes[i]);
+                    for (let j = i + 1; j < boxes.length; j++) {
+                        if (suppressed.has(j)) continue;
+                        if (boxes[i].classId === boxes[j].classId && boxes[i].color === boxes[j].color) {
+                            if (iou(boxes[i], boxes[j]) > iouThresh) {
+                                suppressed.add(j);
+                            }
+                        }
+                    }
+                }
+                return keep;
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            //  SCENE BUILDER (port of scene_builder.py)
+            // ═══════════════════════════════════════════════════════════════
+
+            function buildSceneDescription(allBoxes, frameWidth, frameHeight) {
+                const frameArea = frameWidth * frameHeight;
+                const detections = [];
+
+                for (const box of allBoxes) {
+                    const centerX = (box.x1 + box.x2) / 2;
+
+                    let position;
+                    if (centerX < frameWidth / 3) position = "to your left";
+                    else if (centerX < 2 * frameWidth / 3) position = "ahead of you";
+                    else position = "to your right";
+
+                    const boxArea = (box.x2 - box.x1) * (box.y2 - box.y1);
+                    const sizeRatio = boxArea / frameArea;
+
+                    let proximity;
+                    if (sizeRatio > 0.25) proximity = "very close";
+                    else if (sizeRatio > 0.05) proximity = "nearby";
+                    else proximity = "in the distance";
+
+                    detections.push(`${box.label} (${position}, ${proximity})`);
+                }
+
+                if (detections.length === 0) return "No objects detected nearby.";
+                return "Detected: " + detections.join(", ");
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            //  BROWSER TTS (replaces Piper)
+            // ═══════════════════════════════════════════════════════════════
+
+            function speakText(text) {
+                if (!text || !window.speechSynthesis) return;
+
+                // Don't repeat the exact same text within 10 seconds
+                const now = performance.now();
+                if (text === lastSpokenText && (now - lastSpeakTime) < 10000) return;
+
+                lastSpokenText = text;
+                lastSpeakTime = now;
+
+                // Cancel any ongoing speech
+                window.speechSynthesis.cancel();
+
+                const utterance = new SpeechSynthesisUtterance(text);
+                utterance.rate = 1.1;   // slightly faster for urgency
+                utterance.pitch = 1.0;
+                utterance.volume = 1.0;
+                utterance.lang = "en-US";
+                window.speechSynthesis.speak(utterance);
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            //  LLM INTEGRATION (Ollama via signaling server WebSocket)
+            // ═══════════════════════════════════════════════════════════════
+
+            function sendSceneToLLM(sceneText) {
+                if (!ws || ws.readyState !== WebSocket.OPEN) return;
+                if (pendingLLMRequest) return; // don't stack requests
+
+                pendingLLMRequest = true;
+                lastLLMSentAt = performance.now();
+
+                ws.send(JSON.stringify({
+                    type: "scene_request",
+                    from: "browser_v2",
+                    data: { scene_text: sceneText }
+                }));
+
+                console.log("→ LLM scene_request sent:", sceneText);
+            }
+
+            function handleLLMResponse(description) {
+                pendingLLMRequest = false;
+                const latencyMs = performance.now() - lastLLMSentAt;
+                latencyEl.textContent = latencyMs.toFixed(0);
+
+                console.log("← LLM says:", description);
+                speakText(description);
+
+                // Show in overlay
+                const llmDiv = detectionOverlay.querySelector(".llm-text");
+                if (llmDiv) {
+                    llmDiv.textContent = "🤖 " + description;
+                }
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            //  HEADING / COMPASS / AUDIO (unchanged from v1)
+            // ═══════════════════════════════════════════════════════════════
+
+            function angleDiffDeg(current, target) {
+                return (current - target + 540) % 360 - 180;
+            }
+
+            function headingToCmd(heading) {
+                if (targetHeading === null) return null;
+                const d = angleDiffDeg(heading, targetHeading);
+                if (Math.abs(d) <= forwardDeg) return "forward";
+                return d > 0 ? "left" : "right";
+            }
+
+            async function playCmd(cmd) {
+                if (!audioEnabled) return;
+                if (!cmd || !SOUND_MAP[cmd]) return;
+
+                const now = performance.now();
+                if (cmd === lastCmd && (now - lastCmdAt) < COOLDOWN_MS) return;
+
+                lastCmd = cmd;
+                lastCmdAt = now;
+
+                try {
+                    player.pause();
+                    player.currentTime = 0;
+                    player.src = SOUND_MAP[cmd];
+                    await player.play();
+                } catch (e) {
+                    console.log("Audio play blocked/failed:", e);
+                }
+            }
+
+            function drawArrow(headingDeg) {
+                const w = compass.width;
+                const h = compass.height;
+                const cx = w / 2;
+                const cy = h / 2;
+
+                compCtx.clearRect(0, 0, w, h);
+
+                compCtx.beginPath();
+                compCtx.arc(cx, cy, 62, 0, Math.PI * 2);
+                compCtx.strokeStyle = "rgba(255,255,255,0.35)";
+                compCtx.lineWidth = 2;
+                compCtx.stroke();
+
+                compCtx.fillStyle = "rgba(255,255,255,0.7)";
+                compCtx.font = "12px system-ui";
+                compCtx.textAlign = "center";
+                compCtx.fillText("Forward", cx, 14);
+
+                if (typeof headingDeg !== "number" || Number.isNaN(headingDeg)) return;
+
+                const angleRad = (-headingDeg * Math.PI) / 180;
+                compCtx.save();
+                compCtx.translate(cx, cy);
+                compCtx.rotate(angleRad);
+
+                compCtx.beginPath();
+                compCtx.moveTo(-8, -3);
+                compCtx.lineTo(40, -3);
+                compCtx.lineTo(40, -10);
+                compCtx.lineTo(56, 0);
+                compCtx.lineTo(40, 10);
+                compCtx.lineTo(40, 3);
+                compCtx.lineTo(-8, 3);
+                compCtx.closePath();
+                compCtx.fillStyle = "#ff3b30";
+                compCtx.fill();
+                compCtx.restore();
+            }
+
+            function normalizeHeading(value) {
+                const n = Number(value);
+                if (!Number.isFinite(n)) return null;
+                return ((n % 360) + 360) % 360;
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            //  CAMERA & GEOLOCATION
+            // ═══════════════════════════════════════════════════════════════
+
+            function createSessionId() {
+                if (window.crypto && typeof window.crypto.randomUUID === "function") {
+                    return window.crypto.randomUUID();
+                }
+                return `sess-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+            }
+
+            function setStatus(s) { statusEl.textContent = s; }
+
+            function getSelectedModel() {
+                const selected = Array.from(modelInputs).find((input) => input.checked);
+                return selected?.value || "2";
+            }
+
+            function getIntervalMs() {
+                return Math.round(1000 / fps);
+            }
+
+            function restartCaptureTimer() {
+                if (timer) {
+                    clearInterval(timer);
+                    timer = null;
+                }
+                if (stream) {
+                    timer = setInterval(captureAndProcess, getIntervalMs());
+                }
+            }
+
+            function incErr() {
+                errors++;
+                errsEl.textContent = String(errors);
+            }
+
+            function startLocationTracking() {
+                if (!("geolocation" in navigator) || geoWatchId !== null) return;
+                try {
+                    geoWatchId = navigator.geolocation.watchPosition(
+                        (pos) => {
+                            const lat = Number(pos?.coords?.latitude);
+                            const lon = Number(pos?.coords?.longitude);
+                            latestLatitude = Number.isFinite(lat) ? lat : null;
+                            latestLongitude = Number.isFinite(lon) ? lon : null;
+                        },
+                        (err) => {
+                            console.warn("Geolocation unavailable:", err);
+                        },
+                        { enableHighAccuracy: true, maximumAge: 3000, timeout: 10000 }
+                    );
+                } catch (err) {
+                    console.warn("Failed to start geolocation:", err);
+                }
+            }
+
+            function stopLocationTracking() {
+                if (!("geolocation" in navigator)) return;
+                if (geoWatchId !== null) {
+                    try { navigator.geolocation.clearWatch(geoWatchId); } catch { }
+                    geoWatchId = null;
+                }
+                latestLatitude = null;
+                latestLongitude = null;
+            }
+
+            async function refreshVideoInputs() {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                availableVideoInputs = devices.filter(d => d.kind === "videoinput");
+                switchCamBtn.disabled = availableVideoInputs.length < 2 || !stream;
+            }
+
+            async function startCamera(preferredDeviceId = null) {
+                if (stream) {
+                    stream.getTracks().forEach(t => t.stop());
+                    stream = null;
+                }
+
+                const videoConstraints = preferredDeviceId
+                    ? {
+                        deviceId: { exact: preferredDeviceId },
+                        width: { ideal: TARGET_W },
+                        height: { ideal: TARGET_H }
+                    }
+                    : {
+                        width: { ideal: TARGET_W },
+                        height: { ideal: TARGET_H },
+                        facingMode: "environment"
+                    };
+
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: videoConstraints,
+                    audio: false
+                });
+
+                video.srcObject = stream;
+                await video.play();
+
+                const track = stream.getVideoTracks()[0];
+                activeVideoDeviceId = track?.getSettings?.().deviceId ?? null;
+                await refreshVideoInputs();
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            //  MAIN CAPTURE + PROCESS LOOP (replaces captureAndSend)
+            // ═══════════════════════════════════════════════════════════════
+
+            async function captureAndProcess() {
+                if (!modelsReady) return;
+                if (isProcessing) return; // skip if previous frame still processing
+                if (!video.videoWidth || !video.videoHeight) return;
+
+                isProcessing = true;
+
+                try {
+                    const t0 = performance.now();
+
+                    // Draw current camera frame to the capture canvas
+                    ctx.drawImage(video, 0, 0, TARGET_W, TARGET_H);
+
+                    // Preprocess → tensor
+                    const meta = canvasToTensor(cap);
+
+                    // Run both YOLO models in parallel
+                    const [cocoRaw, customRaw] = await Promise.all([
+                        runModel(cocoSession, meta.tensor),
+                        runModel(customSession, meta.tensor),
+                    ]);
+
+                    // Post-process with NMS
+                    const cocoBoxes = postProcess(cocoRaw, 80, COCO_NAMES, detectionConfidence, meta, "#3b82f6");
+                    const customBoxes = postProcess(customRaw, 6, CUSTOM_NAMES, detectionConfidence, meta, "#ef4444");
+                    const allBoxes = [...cocoBoxes, ...customBoxes];
+
+                    const elapsed = performance.now() - t0;
+
+                    // Update UI
+                    processedFrames++;
+                    sentEl.textContent = String(processedFrames);
+                    inferenceTimeEl.textContent = elapsed.toFixed(0);
+
+                    // Build scene description
+                    const sceneText = buildSceneDescription(allBoxes, TARGET_W, TARGET_H);
+
+                    // Update detection overlay
+                    updateOverlay(allBoxes, sceneText, elapsed);
+
+                    // ── LLM throttle (same logic as web_receiver.py) ──
+                    const now = performance.now() / 1000; // seconds
+                    if (now - lastDescriptionTime > DESCRIPTION_INTERVAL) {
+                        if (sceneText !== "No objects detected nearby.") {
+                            sendSceneToLLM(sceneText);
+                            lastDescriptionTime = now;
+                        }
+                    }
+
+                    // ── Heading-based audio navigation ──
+                    // In v2, we don't receive heading from the server.
+                    // If no heading from compass, we can still provide detection-based warnings.
+                    if (allBoxes.length === 0) {
+                        if (noDetectionSince === null) {
+                            noDetectionSince = performance.now();
+                            noDetectionWarned = false;
+                        } else if (!noDetectionWarned && (performance.now() - noDetectionSince) >= 2000) {
+                            noDetectionWarned = true;
+                            playCmd("beep");
+                        }
+                    } else {
+                        noDetectionSince = null;
+                        noDetectionWarned = false;
+                    }
+
+                } catch (e) {
+                    incErr();
+                    console.error("Frame processing error:", e);
+                } finally {
+                    isProcessing = false;
+                }
+            }
+
+            function updateOverlay(boxes, sceneText, elapsedMs) {
+                detectionOverlay.style.display = "block";
+
+                const detLabels = boxes.map(b =>
+                    `<span style="color:${b.color}"><b>${b.label}</b> ${(b.conf * 100).toFixed(0)}%</span>`
+                ).join(" · ") || "<em>No detections</em>";
+
+                // Keep existing LLM text if present
+                const existingLLM = detectionOverlay.querySelector(".llm-text");
+                const llmHTML = existingLLM ? existingLLM.outerHTML : '<div class="llm-text">🤖 Waiting for LLM…</div>';
+
+                detectionOverlay.innerHTML =
+                    `<div class="det-label">${detLabels}</div>` +
+                    `<div class="scene-text">${sceneText}</div>` +
+                    llmHTML +
+                    `<div class="timing">Inference: ${elapsedMs.toFixed(0)} ms · Frame #${processedFrames}</div>`;
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            //  START / STOP
+            // ═══════════════════════════════════════════════════════════════
+
+            async function start() {
+                if (!modelsReady) {
+                    setStatus("Models not loaded yet…");
+                    return;
+                }
+
+                btn.disabled = true;
+                setStatus("Requesting camera…");
+
+                try {
+                    await startCamera(activeVideoDeviceId);
+                } catch (e) {
+                    incErr();
+                    setStatus("Camera error");
+                    console.error(e);
+                    btn.disabled = false;
+                    return;
+                }
+
+                // Fixed capture size
+                cap.width = TARGET_W;
+                cap.height = TARGET_H;
+                startLocationTracking();
+                currentSessionId = createSessionId();
+
+                setStatus("Connecting to signaling server (for LLM)…");
+
+                // Connect WebSocket for LLM relay only
+                try {
+                    ws = new WebSocket(SIGNALING_SERVER);
+                    ws.binaryType = "arraybuffer";
+
+                    ws.onopen = async () => {
+                        console.log("✅ WS connected to", SIGNALING_SERVER);
+
+                        // Signaling server requires auth as the first message
+                        ws.send(JSON.stringify({ type: "auth", token: BEARER_TOKEN }));
+                        console.log("🔑 Auth message sent");
+
+                        setStatus("Running — AI detection active");
+                        btn.disabled = false;
+
+                        audioEnabled = true;
+                        targetHeading = null;
+                        lastCmd = null;
+                        lastCmdAt = 0;
+                        noDetectionSince = null;
+                        noDetectionWarned = false;
+                        lastDescriptionTime = 0;
+                        pendingLLMRequest = false;
+                        playCmd("started");
+
+                        // Wait 3 seconds after start before processing frames
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+                        if (!stream || timer) return;
+
+                        // Start the capture + process loop
+                        timer = setInterval(captureAndProcess, getIntervalMs());
+                    };
+
+                    ws.onerror = (e) => {
+                        console.error("WS error (LLM relay):", e);
+                        // Don't stop — detection still works without LLM
+                        setStatus("Running (LLM offline)");
+                    };
+
+                    ws.onclose = (ev) => {
+                        console.log(`WS closed (LLM relay) code=${ev.code} reason="${ev.reason}"`);
+                        // Detection continues; only LLM descriptions stop
+                    };
+
+                    ws.onmessage = (msg) => {
+                        console.log("📩 WS message:", typeof msg.data === "string" ? msg.data : `[binary ${msg.data.byteLength}B]`);
+                        if (typeof msg.data !== "string") return; // skip binary
+
+                        try {
+                            const payload = JSON.parse(msg.data);
+
+                            // Handle LLM scene_response
+                            if (payload.type === "scene_response") {
+                                const description = payload?.data?.description;
+                                if (description) {
+                                    handleLLMResponse(description);
+                                }
+                                return;
+                            }
+
+                            // Handle heading responses (from other clients, if any)
+                            const heading = payload?.heading;
+                            const incomingSessionId = payload?.sessionId ?? payload?.session_id ?? null;
+
+                            if (currentSessionId && incomingSessionId === currentSessionId) {
+                                const normalized = normalizeHeading(heading);
+                                if (normalized !== null) {
+                                    latestHeading = normalized;
+                                    headingEl.textContent = normalized.toFixed(1);
+                                    drawArrow(latestHeading);
+
+                                    const isNoDetection = normalized === 90;
+                                    if (isNoDetection) {
+                                        if (noDetectionSince === null) {
+                                            noDetectionSince = performance.now();
+                                            noDetectionWarned = false;
+                                            lastCmd = null;
+                                            lastCmdAt = 0;
+                                        } else if (!noDetectionWarned && (performance.now() - noDetectionSince) >= 2000) {
+                                            noDetectionWarned = true;
+                                            playCmd("beep");
+                                        }
+                                    } else {
+                                        noDetectionSince = null;
+                                        noDetectionWarned = false;
+                                        if (targetHeading === null) {
+                                            targetHeading = latestHeading;
+                                        } else {
+                                            const cmd = headingToCmd(latestHeading);
+                                            playCmd(cmd);
+                                        }
+                                    }
+                                }
+                            }
+                        } catch {
+                            // Not JSON — ignore
+                        }
+                    };
+
+                } catch (e) {
+                    // WebSocket failed — start without LLM
+                    console.error("WS connect failed:", e);
+                    setStatus("Running (no LLM connection)");
+
+                    // Still start detection loop without LLM
+                    btn.disabled = false;
+                    audioEnabled = true;
+                    playCmd("started");
+
+                    await new Promise(resolve => setTimeout(resolve, 3000));
+                    if (!stream || timer) return;
+                    timer = setInterval(captureAndProcess, getIntervalMs());
+                }
+            }
+
+            function stop(allowButton = true) {
+                if (timer) { clearInterval(timer); timer = null; }
+                if (ws) {
+                    try { ws.close(); } catch { }
+                    ws = null;
+                }
+                if (stream) {
+                    stream.getTracks().forEach(t => t.stop());
+                    stream = null;
+                }
+                switchCamBtn.disabled = true;
+                currentSessionId = null;
+                isProcessing = false;
+                stopLocationTracking();
+
+                // Audio reset
+                audioEnabled = false;
+                targetHeading = null;
+                noDetectionSince = null;
+                noDetectionWarned = false;
+                lastCmd = null;
+                try { player.pause(); player.currentTime = 0; } catch { }
+
+                // Stop any ongoing speech
+                if (window.speechSynthesis) {
+                    window.speechSynthesis.cancel();
+                }
+
+                detectionOverlay.style.display = "none";
+
+                if (allowButton) {
+                    btn.disabled = false;
+                    btn.textContent = "Start";
+                    setStatus("Stopped — press Start to resume");
+                }
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            //  EVENT LISTENERS
+            // ═══════════════════════════════════════════════════════════════
+
+            btn.addEventListener("click", () => {
+                // Use `stream` as the running indicator — it's always set while the
+                // camera is active, even when the WebSocket is down or the capture
+                // timer hasn't started yet (e.g. during the 3-second warm-up delay).
+                if (stream) {
+                    setStatus("Stopping…");
+                    stop(true);
+                } else {
+                    btn.textContent = "Stop";
+                    start();
+                }
+            });
+
+            switchCamBtn.addEventListener("click", async () => {
+                if (!stream) {
+                    setStatus("Start first");
+                    return;
+                }
+
+                try {
+                    await refreshVideoInputs();
+                    if (availableVideoInputs.length < 2) {
+                        setStatus("No extra camera found");
+                        return;
+                    }
+
+                    let idx = availableVideoInputs.findIndex(d => d.deviceId === activeVideoDeviceId);
+                    if (idx < 0) idx = 0;
+                    const next = availableVideoInputs[(idx + 1) % availableVideoInputs.length];
+                    await startCamera(next.deviceId);
+
+                    if (stream) {
+                        setStatus("Running — AI detection active");
+                    }
+                } catch (e) {
+                    incErr();
+                    console.error("Camera switch error", e);
+                    setStatus("Camera switch error");
+                }
+            });
+
+            fpsSelect.addEventListener("change", () => {
+                const nextFps = Number(fpsSelect.value);
+                if (!Number.isInteger(nextFps) || nextFps < 1 || nextFps > 10) {
+                    fps = 2;
+                    fpsSelect.value = "2";
+                } else {
+                    fps = nextFps;
+                }
+                restartCaptureTimer();
+            });
+
+            forwardDegSelect.addEventListener("change", () => {
+                const nextForwardDeg = Number(forwardDegSelect.value);
+                if (!Number.isInteger(nextForwardDeg) || nextForwardDeg < 8 || nextForwardDeg > 16) {
+                    forwardDeg = 8;
+                    forwardDegSelect.value = "8";
+                } else {
+                    forwardDeg = nextForwardDeg;
+                }
+            });
+
+            detectionConfidenceSelect.addEventListener("change", () => {
+                const nextDetectionConfidence = Number(detectionConfidenceSelect.value);
+                if (!Number.isFinite(nextDetectionConfidence) || nextDetectionConfidence < 0.1 || nextDetectionConfidence > 0.9) {
+                    detectionConfidence = 0.5;
+                    detectionConfidenceSelect.value = "0.5";
+                } else {
+                    detectionConfidence = Number(nextDetectionConfidence.toFixed(1));
+                }
+            });
+
+            // ═══════════════════════════════════════════════════════════════
+            //  INIT
+            // ═══════════════════════════════════════════════════════════════
+
+            drawArrow(null);
+
+            // Load ONNX models immediately on page load
+            loadModels().catch(e => {
+                statusEl.textContent = `Model load error: ${e.message}`;
+                console.error(e);
+            });
+
+        })();
+    </script>
+</body>
+
+</html>
