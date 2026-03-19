@@ -1,0 +1,595 @@
+<!doctype html>
+<html lang="en">
+<!--
+  Browser-side YOLO ONNX test
+  ────────────────────────────
+  Loads yolov8n.onnx (80 COCO classes) and best.onnx (6 custom classes)
+  via onnxruntime-web, runs inference on the test images, and displays
+  bounding-box results + the scene_builder description.
+
+  Usage:
+    cd blind_nav
+    python -m http.server 8080
+    Open http://localhost:8080/tests/test_onnx_browser.html
+-->
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ONNX Browser Test — YOLO Detection</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: system-ui, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 20px;
+    }
+
+    h1 {
+      text-align: center;
+      margin-bottom: 8px;
+      font-size: 22px;
+    }
+
+    .subtitle {
+      text-align: center;
+      color: #94a3b8;
+      margin-bottom: 20px;
+      font-size: 14px;
+    }
+
+    #status {
+      text-align: center;
+      padding: 12px;
+      background: #1e293b;
+      border-radius: 10px;
+      margin-bottom: 20px;
+      font-size: 15px;
+    }
+
+    .controls {
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+
+    button {
+      padding: 10px 20px;
+      border-radius: 10px;
+      border: 0;
+      background: #facc15;
+      color: #111827;
+      font-weight: 700;
+      font-size: 14px;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+
+    button:hover:not(:disabled) {
+      background: #fde047;
+    }
+
+    select,
+    input[type=file] {
+      padding: 8px 12px;
+      border-radius: 8px;
+      border: 0;
+      background: #1e293b;
+      color: #e2e8f0;
+      font-size: 14px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      background: #1e293b;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, .1);
+    }
+
+    .card canvas {
+      width: 100%;
+      display: block;
+    }
+
+    .card .info {
+      padding: 10px 14px;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .card .info .scene {
+      color: #22d3ee;
+      font-weight: 600;
+      margin-top: 6px;
+    }
+
+    .card .fname {
+      color: #94a3b8;
+      font-size: 12px;
+    }
+
+    .legend {
+      display: flex;
+      gap: 16px;
+      justify-content: center;
+      margin-bottom: 16px;
+      font-size: 13px;
+    }
+
+    .legend span {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .legend .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+      display: inline-block;
+    }
+
+    .perf {
+      text-align: center;
+      color: #94a3b8;
+      font-size: 13px;
+      margin-top: 16px;
+    }
+  </style>
+</head>
+
+<body>
+
+  <h1>ONNX Browser Test — YOLO Detection</h1>
+  <p class="subtitle">Runs yolov8n.onnx (COCO) + best.onnx (custom) entirely in the browser via onnxruntime-web</p>
+
+  <div id="status">Click <b>Run on test images</b> to start, or drop your own images.</div>
+
+  <div class="legend">
+    <span><span class="dot" style="background:#3b82f6"></span> COCO (yolov8n)</span>
+    <span><span class="dot" style="background:#ef4444"></span> Custom (best)</span>
+  </div>
+
+  <div class="controls">
+    <button id="btnRun">Run on test images</button>
+    <input type="file" id="fileInput" accept="image/*" multiple />
+    <label for="confSlider">Confidence: <span id="confVal">0.3</span></label>
+    <input type="range" id="confSlider" min="0.1" max="0.9" step="0.05" value="0.3" />
+  </div>
+
+  <div class="grid" id="grid"></div>
+  <div class="perf" id="perf"></div>
+
+  <!-- onnxruntime-web from CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.min.js"></script>
+
+  <script>
+    (() => {
+      // ── Constants ──
+      const MODEL_W = 640, MODEL_H = 640;
+      const NMS_IOU_THRESHOLD = 0.45;
+
+      // COCO 80 class names (same order as ultralytics yolov8n)
+      const COCO_NAMES = [
+        "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
+        "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
+        "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack",
+        "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball",
+        "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket",
+        "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+        "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
+        "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse",
+        "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
+        "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
+      ];
+
+      // Custom model class names (from best.pt export)
+      const CUSTOM_NAMES = ["puddle", "Fence", "Fence Anomaly", "stairs", "up_steps", "down_steps"];
+
+      // Test images (relative to blind_nav root)
+      const TEST_IMAGES = [
+        "tests/test_images/fences_1.jpg",
+        "tests/test_images/fences_2.jpg",
+        "tests/test_images/fences_3.jpg",
+        "tests/test_images/fences_4.jpg",
+        "tests/test_images/fences_5.jpg",
+        "tests/test_images/fences_6.jpg",
+        "tests/test_images/fences_7.jpg",
+        "tests/test_images/fences_8.jpg",
+        "tests/test_images/stairs_1.jpg",
+        "tests/test_images/stairs_2.jpg",
+        "tests/test_images/stairs_3.jpg",
+        "tests/test_images/stairs_4.jpg",
+        "tests/test_images/stairs_5.jpg",
+        "tests/test_images/puddle_1.jpg",
+        "tests/test_images/puddle_2.jpg",
+        "tests/test_images/puddle_3.jpg",
+        "tests/test_images/puddle_4.jpg",
+        "tests/test_images/puddle_5.jpg",
+        "tests/test_images/puddle_6.jpg",
+        "tests/test_images/puddle_7.jpg",
+        "tests/test_images/puddle_8.jpg",
+      ];
+
+      // ── DOM refs ──
+      const statusEl = document.getElementById("status");
+      const gridEl = document.getElementById("grid");
+      const perfEl = document.getElementById("perf");
+      const btnRun = document.getElementById("btnRun");
+      const fileInput = document.getElementById("fileInput");
+      const confSlider = document.getElementById("confSlider");
+      const confVal = document.getElementById("confVal");
+
+      let confThreshold = 0.3;
+      let cocoSession = null;
+      let customSession = null;
+
+      confSlider.addEventListener("input", () => {
+        confThreshold = parseFloat(confSlider.value);
+        confVal.textContent = confThreshold.toFixed(2);
+      });
+
+      // ── Load ONNX models ──
+      async function loadModels() {
+        statusEl.textContent = "Loading ONNX models (≈24 MB total) …";
+
+        // Use WASM backend (works everywhere; WebGL is optional and can be flaky)
+        ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/";
+
+        const opts = { executionProviders: ["wasm"] };
+
+        const [coco, custom] = await Promise.all([
+          ort.InferenceSession.create("../models/yolov8n.onnx", opts),
+          ort.InferenceSession.create("../models/best.onnx", opts),
+        ]);
+
+        cocoSession = coco;
+        customSession = custom;
+
+        statusEl.textContent = "Models loaded ✓ — ready to run.";
+      }
+
+      // ── Image → Float32 tensor [1,3,640,640] ──
+      function imageToTensor(img) {
+        // Draw image to an offscreen canvas at 640×640
+        const canvas = document.createElement("canvas");
+        canvas.width = MODEL_W;
+        canvas.height = MODEL_H;
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+        // Letterbox: scale while keeping aspect ratio, pad with grey (114)
+        const scale = Math.min(MODEL_W / img.width, MODEL_H / img.height);
+        const nw = Math.round(img.width * scale);
+        const nh = Math.round(img.height * scale);
+        const dx = Math.round((MODEL_W - nw) / 2);
+        const dy = Math.round((MODEL_H - nh) / 2);
+
+        ctx.fillStyle = "rgb(114,114,114)";
+        ctx.fillRect(0, 0, MODEL_W, MODEL_H);
+        ctx.drawImage(img, dx, dy, nw, nh);
+
+        const imageData = ctx.getImageData(0, 0, MODEL_W, MODEL_H);
+        const { data } = imageData; // RGBA Uint8 array
+
+        // Convert to CHW float32 normalised to [0,1]
+        const float32 = new Float32Array(3 * MODEL_W * MODEL_H);
+        const hw = MODEL_W * MODEL_H;
+        for (let i = 0; i < hw; i++) {
+          float32[i] = data[i * 4] / 255; // R
+          float32[hw + i] = data[i * 4 + 1] / 255; // G
+          float32[2 * hw + i] = data[i * 4 + 2] / 255; // B
+        }
+
+        return {
+          tensor: new ort.Tensor("float32", float32, [1, 3, MODEL_H, MODEL_W]),
+          scale, dx, dy, origW: img.width, origH: img.height,
+        };
+      }
+
+      // ── Run ONNX inference ──
+      async function runModel(session, tensor) {
+        const feeds = { images: tensor };
+        const results = await session.run(feeds);
+        return results.output0.data;  // Float32Array
+      }
+
+      // ── Post-process YOLOv8 output ──
+      // Output shape: [1, numClasses+4, 8400]  (transposed compared to some implementations)
+      // Each of the 8400 anchors has: [x_center, y_center, w, h, class0_conf, class1_conf, ...]
+      function postProcess(rawOutput, numClasses, classNames, conf, meta, color) {
+        const numAnchors = 8400;
+        const rowSize = numClasses + 4;
+
+        // rawOutput is [1, rowSize, 8400] flattened → index as [row][col]
+        // row 0 = cx, row 1 = cy, row 2 = w, row 3 = h, row 4..4+numClasses-1 = class confs
+        const boxes = [];
+
+        for (let a = 0; a < numAnchors; a++) {
+          // Find best class
+          let bestClass = 0;
+          let bestConf = 0;
+          for (let c = 0; c < numClasses; c++) {
+            const v = rawOutput[(4 + c) * numAnchors + a];
+            if (v > bestConf) { bestConf = v; bestClass = c; }
+          }
+          if (bestConf < conf) continue;
+
+          // Get box in model coordinates (640×640 with letterbox)
+          const cx = rawOutput[0 * numAnchors + a];
+          const cy = rawOutput[1 * numAnchors + a];
+          const w = rawOutput[2 * numAnchors + a];
+          const h = rawOutput[3 * numAnchors + a];
+
+          // Convert from model-space (640×640 letterboxed) → original image coords
+          const x1_model = cx - w / 2;
+          const y1_model = cy - h / 2;
+          const x2_model = cx + w / 2;
+          const y2_model = cy + h / 2;
+
+          const x1 = (x1_model - meta.dx) / meta.scale;
+          const y1 = (y1_model - meta.dy) / meta.scale;
+          const x2 = (x2_model - meta.dx) / meta.scale;
+          const y2 = (y2_model - meta.dy) / meta.scale;
+
+          boxes.push({
+            x1, y1, x2, y2,
+            conf: bestConf,
+            classId: bestClass,
+            label: classNames[bestClass],
+            color,
+          });
+        }
+
+        // NMS per class
+        return nms(boxes, NMS_IOU_THRESHOLD);
+      }
+
+      // ── Non-Maximum Suppression ──
+      function iou(a, b) {
+        const ix1 = Math.max(a.x1, b.x1);
+        const iy1 = Math.max(a.y1, b.y1);
+        const ix2 = Math.min(a.x2, b.x2);
+        const iy2 = Math.min(a.y2, b.y2);
+        const inter = Math.max(0, ix2 - ix1) * Math.max(0, iy2 - iy1);
+        const areaA = (a.x2 - a.x1) * (a.y2 - a.y1);
+        const areaB = (b.x2 - b.x1) * (b.y2 - b.y1);
+        return inter / (areaA + areaB - inter + 1e-6);
+      }
+
+      function nms(boxes, iouThresh) {
+        // Sort by confidence descending
+        boxes.sort((a, b) => b.conf - a.conf);
+        const keep = [];
+        const suppressed = new Set();
+        for (let i = 0; i < boxes.length; i++) {
+          if (suppressed.has(i)) continue;
+          keep.push(boxes[i]);
+          for (let j = i + 1; j < boxes.length; j++) {
+            if (suppressed.has(j)) continue;
+            if (boxes[i].classId === boxes[j].classId && boxes[i].color === boxes[j].color) {
+              if (iou(boxes[i], boxes[j]) > iouThresh) {
+                suppressed.add(j);
+              }
+            }
+          }
+        }
+        return keep;
+      }
+
+      // ── Scene builder (port of scene_builder.py) ──
+      function buildSceneDescription(allBoxes, frameWidth, frameHeight) {
+        const frameArea = frameWidth * frameHeight;
+        const detections = [];
+
+        for (const box of allBoxes) {
+          const centerX = (box.x1 + box.x2) / 2;
+
+          // Position: left / center / right
+          let position;
+          if (centerX < frameWidth / 3) position = "to your left";
+          else if (centerX < 2 * frameWidth / 3) position = "ahead of you";
+          else position = "to your right";
+
+          // Proximity based on box area
+          const boxArea = (box.x2 - box.x1) * (box.y2 - box.y1);
+          const sizeRatio = boxArea / frameArea;
+
+          let proximity;
+          if (sizeRatio > 0.25) proximity = "very close";
+          else if (sizeRatio > 0.05) proximity = "nearby";
+          else proximity = "in the distance";
+
+          detections.push(`${box.label} (${position}, ${proximity})`);
+        }
+
+        if (detections.length === 0) return "No objects detected nearby.";
+        return "Detected: " + detections.join(", ");
+      }
+
+      // ── Draw results on canvas ──
+      function drawResults(canvas, img, boxes) {
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0);
+
+        for (const box of boxes) {
+          const bx = Math.max(0, box.x1);
+          const by = Math.max(0, box.y1);
+          const bw = Math.min(img.width, box.x2) - bx;
+          const bh = Math.min(img.height, box.y2) - by;
+
+          // Box
+          ctx.strokeStyle = box.color;
+          ctx.lineWidth = 2;
+          ctx.strokeRect(bx, by, bw, bh);
+
+          // Label background
+          const label = `${box.label} ${(box.conf * 100).toFixed(0)}%`;
+          ctx.font = "bold 13px system-ui";
+          const tw = ctx.measureText(label).width;
+          ctx.fillStyle = box.color;
+          ctx.fillRect(bx, by - 18, tw + 8, 18);
+
+          // Label text
+          ctx.fillStyle = "#fff";
+          ctx.fillText(label, bx + 4, by - 4);
+        }
+      }
+
+      // ── Process a single image ──
+      async function processImage(imgSrc, fileName) {
+        const img = await loadImage(imgSrc);
+
+        const t0 = performance.now();
+
+        // Preprocess
+        const meta = imageToTensor(img);
+
+        // Run both models
+        const [cocoRaw, customRaw] = await Promise.all([
+          runModel(cocoSession, meta.tensor),
+          runModel(customSession, meta.tensor),
+        ]);
+
+        // Post-process
+        const cocoBoxes = postProcess(cocoRaw, 80, COCO_NAMES, confThreshold, meta, "#3b82f6");
+        const customBoxes = postProcess(customRaw, 6, CUSTOM_NAMES, confThreshold, meta, "#ef4444");
+        const allBoxes = [...cocoBoxes, ...customBoxes];
+
+        const elapsed = performance.now() - t0;
+
+        // Scene description
+        const scene = buildSceneDescription(allBoxes, img.width, img.height);
+
+        // Build card
+        const card = document.createElement("div");
+        card.className = "card";
+
+        const canvas = document.createElement("canvas");
+        drawResults(canvas, img, allBoxes);
+        card.appendChild(canvas);
+
+        const info = document.createElement("div");
+        info.className = "info";
+
+        const detLines = allBoxes.map(b =>
+          `<b style="color:${b.color}">${b.label}</b> ${(b.conf * 100).toFixed(0)}%`
+        );
+        info.innerHTML =
+          `<div class="fname">${fileName} — ${elapsed.toFixed(0)} ms</div>` +
+          (detLines.length ? detLines.join(" · ") : "<em>No detections</em>") +
+          `<div class="scene">${scene}</div>`;
+
+        card.appendChild(info);
+        gridEl.appendChild(card);
+
+        return elapsed;
+      }
+
+      function loadImage(src) {
+        return new Promise((resolve, reject) => {
+          const img = new Image();
+          img.crossOrigin = "anonymous";
+          img.onload = () => resolve(img);
+          img.onerror = reject;
+          img.src = src;
+        });
+      }
+
+      // ── Run on built-in test images ──
+      async function runTestImages() {
+        btnRun.disabled = true;
+        gridEl.innerHTML = "";
+        perfEl.textContent = "";
+
+        if (!cocoSession) await loadModels();
+
+        statusEl.textContent = `Running inference on ${TEST_IMAGES.length} test images …`;
+
+        let totalMs = 0;
+        for (let i = 0; i < TEST_IMAGES.length; i++) {
+          const path = TEST_IMAGES[i];
+          const name = path.split("/").pop();
+          statusEl.textContent = `Processing ${name} (${i + 1}/${TEST_IMAGES.length}) …`;
+          try {
+            totalMs += await processImage("../" + path, name);
+          } catch (e) {
+            console.error(`Failed to process ${name}:`, e);
+            statusEl.textContent = `Error on ${name}: ${e.message}`;
+          }
+        }
+
+        const avg = (totalMs / TEST_IMAGES.length).toFixed(0);
+        statusEl.textContent = `Done ✓ — ${TEST_IMAGES.length} images processed.`;
+        perfEl.textContent = `Total: ${totalMs.toFixed(0)} ms · Average: ${avg} ms per image (preprocessing + 2× ONNX inference + NMS + draw)`;
+        btnRun.disabled = false;
+      }
+
+      // ── Run on user-uploaded images ──
+      async function runUserImages(files) {
+        btnRun.disabled = true;
+        gridEl.innerHTML = "";
+        perfEl.textContent = "";
+
+        if (!cocoSession) await loadModels();
+
+        statusEl.textContent = `Running inference on ${files.length} uploaded image(s) …`;
+
+        let totalMs = 0;
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i];
+          statusEl.textContent = `Processing ${file.name} (${i + 1}/${files.length}) …`;
+          const url = URL.createObjectURL(file);
+          try {
+            totalMs += await processImage(url, file.name);
+          } catch (e) {
+            console.error(`Failed to process ${file.name}:`, e);
+          }
+          URL.revokeObjectURL(url);
+        }
+
+        const avg = files.length ? (totalMs / files.length).toFixed(0) : 0;
+        statusEl.textContent = `Done ✓ — ${files.length} image(s) processed.`;
+        perfEl.textContent = `Total: ${totalMs.toFixed(0)} ms · Average: ${avg} ms per image`;
+        btnRun.disabled = false;
+      }
+
+      // ── Event listeners ──
+      btnRun.addEventListener("click", runTestImages);
+
+      fileInput.addEventListener("change", () => {
+        if (fileInput.files.length > 0) {
+          runUserImages(Array.from(fileInput.files));
+        }
+      });
+
+      // Pre-load models on page load
+      loadModels().catch(e => {
+        statusEl.textContent = `Model load error: ${e.message}`;
+        console.error(e);
+      });
+
+    })();
+  </script>
+</body>
+
+</html>
