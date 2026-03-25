@@ -83,8 +83,12 @@ ws_thread = threading.Thread(target=start_ws_loop, args=(ws_loop,), daemon=True)
 ws_thread.start()
 
 # create a Signalint client instance so Anydesk server knows who sent the request
-client = signaling_client.SignalingClient(client_name="detector_pc")
-
+#Sclient = signaling_client.SignalingClient(client_name="detector_pc")
+client = signaling_client.SignalingClient(
+    server_uri=signaling_client.SIGNALING_SERVER.rstrip("/") + signaling_client.DEFAULT_ROOM,
+    client_name="detector_pc",
+    token=signaling_client.DEFAULT_TOKEN,
+)
 
 # Connect to Signaling server (wss://signaling.ehb.be) from the main thread
 # Main thread - synchronous	OpenCV camera loop, YOLO, speaker
