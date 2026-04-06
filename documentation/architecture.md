@@ -1,13 +1,15 @@
 # Blind Navigation Assistant — Architecture & Flow
 
 A real-time navigation assistant for blind and visually impaired people.  
-Detects objects via YOLO, describes the scene via a remote LLM (Ollama/Mistral), and speaks the result aloud.
+Detects objects via YOLO, describes the scene via a remote LLM (Ollama/Mistral), and speaks the result aloud using **Piper** neural TTS (local ONNX) and **pw-play** (PipeWire).
 
 ---
 
 ## System Architecture
 
-The system runs across **two machines** connected via a **WebSocket signaling server**:
+The system runs across **two machines** connected via a **WebSocket signaling server**. On the laptop there are **two entry points**: local webcam (`run.py` → `detector.py`) or browser-fed frames (`run_web.py` → `web_receiver.py`).
+
+### Local webcam mode
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -23,14 +25,14 @@ The system runs across **two machines** connected via a **WebSocket signaling se
 │                           │                                      │
 │                           ▼                                      │
 │                 ┌──────────────────┐                              │
-│                 │ signaling_client │──── WebSocket (send) ──────────┐
+│                 │ SignalingClient  │──── WebSocket (send) ─────────┐
 │                 │  (detector_pc)   │◀── WebSocket (recv) ──────────┐│
 │                 └────────┬─────────┘                              ││
 │                          │                                       ││
 │                          ▼                                       ││
 │                   ┌─────────────┐                                ││
 │                   │  speaker.py │                                ││
-│                   │  (spd-say)  │                                ││
+│                   │ Piper+pw-play│                                ││
 │                   └──────┬──────┘                                ││
 │                          │                                       ││
 │                          ▼                                       ││
@@ -42,9 +44,9 @@ The system runs across **two machines** connected via a **WebSocket signaling se
                     │  wss://signaling.ehb.be  │◀──────────────────┘│
                     │   (EHB Signaling Server)  │───────────────────┘
                     └──────────────────────────┘
-                                                                    
+
 ┌─────────────────────────────────────────────────────────────────┐
-│                     ANYDESK SERVER (Remote)                      │
+│                     REMOTE SERVER (Anydesk / GPU host)           │
 │                                                                 │
 │   ┌────────────────────┐    ┌─────────────────────────────┐     │
 │   │ signaling_client.py│───▶│  Ollama (Mistral:latest)    │     │
@@ -54,29 +56,42 @@ The system runs across **two machines** connected via a **WebSocket signaling se
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+### Browser camera mode
+
+The browser (e.g. `tests/teststayontrails.html`) publishes **JPEG frames** and metadata over the same signaling WebSocket. The laptop runs `run_web.py`, which loads `blind/web_receiver.py`:
+
+- **Connection A (async):** receives `frame_meta` JSON plus **binary JPEG** messages; decodes frames and runs the same YOLO → `scene_builder` pipeline as `detector.py` (including every 3rd frame and the **8 second** LLM throttle).
+- **Connection B (background thread + `ws_loop`):** a `SignalingClient` named `web_receiver_pc` sends `scene_request` and reads `scene_response`. Because the server also broadcasts JPEG traffic to this client, `call_llm` **loops on `recv`**, skipping binary payloads and non-`scene_response` JSON until the Ollama reply arrives.
+
+TTS is still **Piper** + **pw-play** via `speaker.py`.
+
+**Configuration note:** `blind/detector.py` joins the signaling URL with `DEFAULT_ROOM` and sends `DEFAULT_TOKEN`. `blind/web_receiver.py` currently creates its LLM `SignalingClient` with **default** `server_uri` and **no** token. If your server expects the same room path and Bearer auth as the webcam path, mirror the `server_uri` / `token` arguments from `detector.py` in `web_receiver.py`.
+
 ---
 
-## Data Flow — Step by Step
+## Data Flow — Step by Step (local webcam)
 
 | Step | Where | What happens | File |
 |------|-------|-------------|------|
-| **1** | Laptop | Webcam captures a frame via OpenCV | `detector.py` |
-| **2** | Laptop | YOLOv8 runs object detection (every 3rd frame) — two models: COCO (80 classes) + custom (puddle, fence, stairs) | `detector.py` |
-| **3** | Laptop | Detections are converted to human-readable text with position (left/center/right) and proximity (close/nearby/distance) | `scene_builder.py` |
-| **4** | Laptop | Scene text is sent as a `scene_request` JSON message via WebSocket to the signaling server (every 5 seconds) | `detector.py` → `signaling_client.py` |
-| **5** | Signaling Server | `wss://signaling.ehb.be` relays the message to all connected clients | EHB infrastructure |
-| **6** | Anydesk Server | `signaling_client.py` (running as `anydesk_worker`) receives the `scene_request` | `signaling_client.py` |
-| **7** | Anydesk Server | Ollama (Mistral) generates a short, safety-focused scene description | `signaling_client.py` → Ollama API |
-| **8** | Anydesk Server | The LLM response is sent back as a `scene_response` JSON message via WebSocket | `signaling_client.py` |
-| **9** | Signaling Server | Relays the response back to the laptop | EHB infrastructure |
-| **10** | Laptop | `detector.py` receives the description and stores it in shared state | `detector.py` |
-| **11** | Laptop | `speaker.py` speaks the description aloud via `spd-say` (Linux speech-dispatcher) | `speaker.py` |
+| **1** | Laptop | Webcam captures a frame via OpenCV | `blind/detector.py` |
+| **2** | Laptop | YOLOv8 runs object detection (every 3rd frame) — two models: COCO (80 classes) + custom (puddle, fence, stairs, …) | `blind/detector.py` |
+| **3** | Laptop | Detections are converted to human-readable text with position (left / ahead / right) and proximity (very close / nearby / in the distance) | `blind/scene_builder.py` |
+| **4** | Laptop | Scene text is sent as a `scene_request` JSON message via WebSocket (at most every **8 seconds**, and only if the scene is not empty) | `blind/detector.py` → `anydesk_server/signaling_client.py` (`SignalingClient`) |
+| **5** | Signaling Server | `wss://signaling.ehb.be` relays the message to connected clients | EHB infrastructure |
+| **6** | Remote server | `signaling_client.py` (role `anydesk_worker`) receives the `scene_request` | `anydesk_server/signaling_client.py` |
+| **7** | Remote server | Ollama (Mistral) returns a **single short spoken line** (system prompt: safety-first, **max ~10 words**, one sentence) | `ask_ollama()` → Ollama API |
+| **8** | Remote server | The reply is sent as a `scene_response` JSON message | `signaling_client.py` |
+| **9** | Signaling Server | Relays the response to the laptop | EHB infrastructure |
+| **10** | Laptop | The detector stores the description in shared state (`last_description` under a lock) | `blind/detector.py` |
+| **11** | Laptop | `speaker.py` synthesises audio with **Piper** (ONNX) and plays it with **pw-play** | `blind/speaker.py` |
 
 ---
 
 ## WebSocket Message Format
 
-### `scene_request` (Laptop → Anydesk Server)
+`SignalingClient.send()` **adds `from` automatically** if omitted, using the client’s `client_name`.
+
+### `scene_request` (Laptop → remote LLM worker)
 
 ```json
 {
@@ -88,24 +103,37 @@ The system runs across **two machines** connected via a **WebSocket signaling se
 }
 ```
 
-### `scene_response` (Anydesk Server → Laptop)
+(In browser mode, `from` is `web_receiver_pc` when sent from `web_receiver.py`.)
+
+### `scene_response` (Remote LLM worker → Laptop)
 
 ```json
 {
   "type": "scene_response",
   "from": "anydesk_worker",
   "data": {
-    "description": "There is a person very close ahead of you. A car is parked to your left in the distance. Please proceed with caution.",
+    "description": "Person very close ahead, car left in distance.",
     "original_scene": "Detected: person (ahead of you, very close), car (to your left, in the distance)"
   }
 }
 ```
 
+The live Ollama system prompt asks for **one short sentence** (roughly **10 words**), so real `description` strings are usually shorter than early prose-style examples.
+
+### Browser frame traffic (browser mode only)
+
+Per frame, the browser typically sends:
+
+1. A JSON message with `type: "frame_meta"` (and ids / session fields).
+2. A **binary** message containing raw **JPEG** bytes.
+
+`web_receiver.py` ignores the JSON for inference and runs YOLO on the JPEG.
+
 ---
 
 ## Threading Model
 
-The laptop runs **three concurrent execution contexts** because OpenCV (synchronous) and WebSockets (async) cannot share the same thread:
+The laptop uses **three concurrent execution contexts** for the webcam path because OpenCV (synchronous) and WebSockets (async) cannot share one thread:
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -131,33 +159,44 @@ The laptop runs **three concurrent execution contexts** because OpenCV (synchron
 ```
 
 **Why three threads?**
-- `cv2.waitKey()` blocks the main thread — it must stay synchronous
-- `websockets` library is async (`await`) — needs its own event loop
-- LLM calls take 5–30 seconds — a separate thread prevents the camera from freezing
+
+- `cv2.waitKey()` keeps the main loop synchronous.
+- The `websockets` library is asyncio-based.
+- LLM round-trips take several seconds; offloading them avoids blocking capture and UI.
+
+**Browser mode:** JPEG reception runs inside `asyncio.run(listen_for_frames())` on the main thread; `process_frame` is synchronous. The **same** background `ws_loop` + LLM thread pattern is used for Ollama traffic as in `detector.py`.
 
 ---
 
 ## YOLO Detection — Two-Model Approach
 
-The system runs **two YOLO models** simultaneously for comprehensive detection:
+The system runs **two YOLO models** in parallel where weights are present:
 
 | Model | File | Classes | Source |
 |-------|------|---------|--------|
 | **COCO model** | `models/yolov8n.pt` | 80 classes (person, car, truck, bicycle, traffic light, etc.) | Pre-trained by Ultralytics |
-| **Custom model** | `models/best.pt` | 6 classes (puddle, Fence, Fence Anomaly, stairs, up_steps, down_steps) | Fine-tuned on combined Roboflow dataset via Google Colab |
+| **Custom model** | `models/best.pt` | 6 classes (puddle, Fence, Fence Anomaly, stairs, up_steps, down_steps) | Fine-tuned on a combined Roboflow dataset (e.g. Colab) |
 
-**Why two models instead of one?**
-- The COCO model is already highly accurate for common objects — no need to retrain
-- The custom model adds domain-specific classes (puddles, fences, stairs) that COCO doesn't cover
-- Results from both models are **merged** in `scene_builder.py` into a single description
+If `best.pt` is missing, the code runs **COCO-only** and logs a warning.
 
-### Custom Model Training
+**Why two models?**
 
-The custom model was trained by:
-1. **Collecting datasets** from Roboflow Universe (puddle detection, fences, stairs)
-2. **Merging** them with `tools/merge_datasets.py` — remapping class IDs to avoid conflicts
-3. **Training** YOLOv8n on Google Colab (free GPU) for 50 epochs with `imgsz=640`, `batch=16`
-4. **Downloading** the `best.pt` weights to `models/`
+- COCO covers common obstacles and traffic-related objects.
+- The custom head adds puddles, fences, and stair/step classes COCO does not label.
+- `scene_builder.py` **merges** detections from both result objects into one string.
+
+### Optional ONNX artifacts
+
+The repository may also contain exported weights (e.g. `models/yolov8n.onnx`) for experiments or browser-side inference tests — **runtime detection** in `detector.py` / `web_receiver.py` uses **Ultralytics `.pt`** loading.
+
+### Custom Model Training (historical workflow)
+
+The custom model was produced by:
+
+1. Collecting Roboflow Universe exports (puddles, fences, stairs).
+2. Merging datasets with **consistent class ID remapping** (done in the training project — not shipped as `tools/` in this repo).
+3. Training YOLOv8n (e.g. on Google Colab) with `imgsz=640`, `batch=16`, ~50 epochs.
+4. Placing `best.pt` under `models/`.
 
 #### Custom Class Mapping
 
@@ -174,7 +213,7 @@ The custom model was trained by:
 
 ## Scene Builder — How Detections Become Text
 
-`scene_builder.py` converts raw YOLO bounding boxes into spoken descriptions using two heuristics:
+`scene_builder.py` converts YOLO boxes into phrases using the same rules as before:
 
 ### Position (horizontal thirds)
 
@@ -188,8 +227,6 @@ The custom model was trained by:
 └───────────┴───────────┴───────────┘
 ```
 
-The center x-coordinate of each bounding box determines which third it falls in.
-
 ### Proximity (bounding box area ratio)
 
 | Size ratio (box area / frame area) | Label |
@@ -198,61 +235,62 @@ The center x-coordinate of each bounding box determines which third it falls in.
 | > 5% | **nearby** |
 | ≤ 5% | **in the distance** |
 
-Larger bounding boxes mean the object is closer to the camera.
-
-### Example Output
-
-```
-Detected: person (ahead of you, very close), refrigerator (to your right, nearby), 
-chair (to your left, in the distance), chair (to your right, in the distance)
-```
+Detections with confidence **≤ 0.3** are filtered out.
 
 ---
 
 ## Project Structure
 
 ```
-assignment/
-├── run.py                        ← Entry point: poetry run python run.py
-├── .gitignore                    ← Ignores weights, datasets, caches
+blind_nav/                        ← repository root
+├── run.py                        ← Entry point (local webcam): poetry run python run.py
+├── run_web.py                    ← Entry point (browser frames): poetry run python run_web.py
+├── .gitignore
+├── README.md
 │
-├── blind/                    ← Runtime application package
-│   ├── __init__.py               ← Makes blind a Python package
-│   ├── detector.py               ← Main loop: camera → YOLO → WebSocket → TTS
-│   ├── scene_builder.py          ← Converts YOLO detections → human-readable text
-│   └── speaker.py                ← Text-to-speech via spd-say (Linux)
+├── blind/
+│   ├── detector.py               ← Webcam loop: YOLO → WebSocket LLM → Piper TTS
+│   ├── web_receiver.py         ← Browser JPEG loop + LLM client + Piper TTS
+│   ├── scene_builder.py          ← YOLO → scene text
+│   └── speaker.py                ← Piper ONNX + pw-play
 │
-├── anydesk_server/               ← Runs on the remote Anydesk server
-│   ├── signaling_client.py       ← WebSocket client + Ollama integration
-│   ├── _send_json.py             ← Deprecated: early WebSocket send prototype
-│   └── _receive_json.py          ← Deprecated: early WebSocket receive prototype
+├── anydesk_server/
+│   └── signaling_client.py       ← SignalingClient + Ollama listener (run on GPU host)
 │
-├── models/                       ← Model weights
-│   ├── yolov8n.pt                ← Pre-trained COCO (80 classes)
-│   └── best.pt                   ← Custom-trained (puddle, fence, stairs)
+├── models/
+│   ├── yolov8n.pt                ← COCO weights (required for default path)
+│   ├── best.pt                   ← Custom weights (optional)
+│   ├── yolov8n.onnx              ← Optional export / experiments
+│   └── piper/
+│       └── en_US-amy-medium.onnx (+ sidecar JSON)  ← Piper voice
 │
-├── tools/                        ← Offline scripts (not used at runtime)
-│   ├── train_model.py            ← YOLOv8 training script
-│   ├── merge_datasets.py         ← Combines Roboflow datasets with class remapping
-│   └── roboflow.py               ← Roboflow dataset download script
+├── tests/
+│   ├── test_signaling.py         ← WebSocket / Ollama checks
+│   ├── test_speaker.py           ← TTS
+│   ├── test_piper.py             ← Piper-specific checks
+│   ├── test_best_model.py        ← Custom YOLO weights
+│   ├── test_onnx_pt.py           ← ONNX vs PyTorch comparison
+│   ├── test_onnx_browser.html    ← Browser ONNX experiments
+│   └── teststayontrails.html     ← Browser camera demo (used with run_web.py)
 │
-├── tests/                        ← Test scripts
-│   ├── test_signaling.py         ← Tests WebSocket + Ollama connectivity
-│   └── test_speaker.py           ← Tests TTS output
+├── documentation/
+│   └── architecture.md           ← This file
 │
-├── roboflow/                     ← Training datasets (git-ignored, ~25k images)
-│   ├── combined/                 ← Merged dataset used for training
-│   ├── puddle-detection.v3-v_2.yolov8/
-│   ├── Fences.v2-v_2.yolov8/
-│   └── Dataset-Stairs-1/
-│
-├── runs/                         ← YOLO training output (git-ignored)
-│
-└── _documentation/               ← This file and other docs
-    ├── architecture.md           ← ← You are here
-    ├── ai_project_proposal.md
-    └── project_notes.md
+├── roboflow/                     ← Training data (often git-ignored)
+├── runs/                         ← YOLO training outputs (often git-ignored)
 ```
+
+---
+
+## Signaling URLs and Auth (implementation)
+
+In `anydesk_server/signaling_client.py`:
+
+- Base server: `SIGNALING_SERVER = "wss://signaling.ehb.be"`.
+- Default room path: `DEFAULT_ROOM = "/ws/pathnavigation"` (appended to the base URL for the worker and for `detector.py`).
+- Optional **Bearer** token: `DEFAULT_TOKEN` — passed as the `Authorization` header when non-empty.
+
+`blind/detector.py` constructs `server_uri` as `SIGNALING_SERVER + DEFAULT_ROOM` and passes `DEFAULT_TOKEN` so it joins the same room as the remote worker.
 
 ---
 
@@ -260,75 +298,89 @@ assignment/
 
 | Component | Technology | Why |
 |-----------|-----------|-----|
-| Object Detection | **YOLOv8 Nano** (Ultralytics) | Fast, lightweight, real-time capable |
-| LLM | **Ollama + Mistral:latest** | Local LLM, no cloud dependency, safety-focused prompts |
-| WebSocket | **websockets** library + **EHB Signaling Server** | Bridges laptop ↔ Anydesk server |
-| Text-to-Speech | **spd-say** (speech-dispatcher) | Built into Linux, non-blocking |
-| Camera | **OpenCV** (`cv2.VideoCapture`) | Standard Python camera interface |
-| Training | **Google Colab** (free GPU) | YOLOv8 training too slow on CPU |
-| Dataset Management | **Roboflow** | Annotation, export, dataset hosting |
-| Package Manager | **Poetry** | Dependency management for the project |
+| Object Detection | **YOLOv8 Nano** (Ultralytics) | Fast, real-time on CPU with frame skipping |
+| LLM | **Ollama + Mistral:latest** | Local inference on the remote machine |
+| WebSocket | **websockets** + **EHB Signaling Server** | Relays JSON (and binary frames in browser mode) |
+| Text-to-Speech | **Piper** (ONNX) + **pw-play** (PipeWire) | Local synthesis, non-blocking playback |
+| Camera | **OpenCV** (`cv2.VideoCapture`) | Local webcam |
+| Training | **Google Colab** (typical) | GPU for YOLO training |
+| Dataset Management | **Roboflow** | Annotation and export |
+| Package Manager | **Poetry** | Dependencies |
 
 ---
 
 ## How to Run
 
-### On the Laptop (detection + camera + TTS)
+### Laptop — local webcam
 
 ```bash
-cd assignment/
+cd blind_nav
 poetry run python run.py
 ```
 
 Press `q` in the OpenCV window to quit.
 
-### On the Anydesk Server (LLM)
+### Laptop — browser camera
+
+Serve the `tests/` directory over HTTP(S), open `teststayontrails.html`, start the camera, then:
 
 ```bash
-python signaling_client.py
+cd blind_nav
+poetry run python run_web.py
 ```
 
-This connects to the signaling server and waits for `scene_request` messages.  
-When one arrives, it calls Ollama and sends the response back.
+### Remote server — Ollama + signaling listener
 
-### Running Tests
+From the repo (or a copy of `anydesk_server/`):
 
 ```bash
-# Test WebSocket connectivity (from laptop)
-poetry run python tests/test_signaling.py
+cd anydesk_server
+python signaling_client.py --token YOUR_BEARER_TOKEN
+```
 
-# Test WebSocket + Ollama (from Anydesk server)
-python tests/test_signaling.py --ollama
+Flags:
+
+- `--room` — override room path (default matches `DEFAULT_ROOM` in code).
+- `--skip-test` — skip the local Ollama smoke test before connecting.
+
+When a `scene_request` arrives, the script calls Ollama and sends `scene_response` back.
+
+### Tests
+
+```bash
+cd blind_nav
+poetry run python tests/test_signaling.py
+poetry run python tests/test_speaker.py
+poetry run python tests/test_piper.py
 ```
 
 ---
 
 ## Timing & Performance
 
-| Operation | Frequency | Duration |
-|-----------|-----------|----------|
-| Camera frame capture | Every frame (~30 FPS) | < 1 ms |
-| YOLO inference | Every 3rd frame (~10 FPS) | ~20–50 ms (CPU) |
-| Scene text generation | Every 3rd frame | < 1 ms |
-| WebSocket send | Every 5 seconds | < 100 ms |
-| Ollama LLM response | Every 5 seconds | 3–15 seconds |
-| TTS playback | After each LLM response | 2–5 seconds |
+| Operation | Frequency | Notes |
+|-----------|-----------|--------|
+| Camera / JPEG frame | Every frame | Webcam: `cap.read`; browser: each received JPEG |
+| YOLO inference | Every 3rd frame | Reduces CPU load |
+| Scene text | Every 3rd frame | Trivial cost vs YOLO |
+| LLM WebSocket request | At most every **8 seconds** | `description_interval` / `DESCRIPTION_INTERVAL` — leaves time for Ollama and Piper |
+| Ollama response | On each request | Often ~3–15 s (hardware dependent) |
+| TTS | After each new description | Piper + pw-play; overlapping playback is cut off when a new line starts |
 
-The 5-second interval between LLM calls balances responsiveness with server load.  
-YOLO runs every 3rd frame to keep the camera display smooth while saving CPU.
+The **8 second** throttle balances responsiveness with server load and avoids queuing speech back-to-back.
 
 ---
 
 ## Custom Model — Training Metrics
 
-The custom YOLOv8n model was trained on **Google Colab** (T4 GPU) using the combined Roboflow dataset.
+The tables below are a **snapshot** from the training run that produced the documented `best.pt` (Colab / T4). Re-train or swap weights and metrics will change.
 
 ### Training Configuration
 
 | Parameter | Value |
 |-----------|-------|
-| Base model | `yolov8n.pt` (YOLOv8 Nano, pre-trained on COCO) |
-| Training approach | Transfer learning (fine-tune detection head, keep COCO backbone) |
+| Base model | `yolov8n.pt` (YOLOv8 Nano, COCO pre-trained) |
+| Training approach | Transfer learning |
 | Epochs | 50 |
 | Image size | 640 × 640 |
 | Batch size | 16 |
@@ -341,35 +393,27 @@ The custom YOLOv8n model was trained on **Google Colab** (T4 GPU) using the comb
 
 | Metric | Value | Meaning |
 |--------|-------|---------|
-| **Precision** | **0.824** | 82.4% of detections are correct (low false positives) |
-| **Recall** | **0.707** | 70.7% of real objects are found (misses ~30%) |
-| **mAP50** | **0.744** | Overall accuracy at 50% IoU threshold — good for a first model |
-| **mAP50-95** | **0.430** | Stricter accuracy averaged across IoU 0.50–0.95 |
+| **Precision** | **0.824** | Low false positives |
+| **Recall** | **0.707** | Misses ~30% of objects |
+| **mAP50** | **0.744** | Reasonable at IoU 0.5 |
+| **mAP50-95** | **0.430** | Stricter localization |
 
 ### Per-Class Breakdown
 
 | Class | Precision | Recall | mAP50 | mAP50-95 | Val Samples | Assessment |
 |-------|-----------|--------|-------|----------|-------------|------------|
-| **puddle** | 0.819 | 0.777 | **0.842** | 0.478 | 399 | Good — high precision despite low-contrast targets |
-| **Fence** | 0.563 | 0.702 | 0.670 | 0.352 | 84 | Moderate — limited training data |
-| **Fence Anomaly** | 1.000 | 0.545 | 0.548 | 0.289 | 11 | Weak — only 11 validation samples, too few to generalize |
-| **stairs** | 0.970 | 0.960 | **0.971** | 0.775 | 174 | **Excellent** — visually distinct, plenty of data |
-| **up_steps** | 0.857 | 0.754 | **0.842** | 0.456 | 499 | Good — reliable detection |
-| **down_steps** | 0.737 | 0.503 | 0.588 | 0.226 | 206 | Weak — hardest to distinguish visually |
-
-### Key Takeaways
-
-1. **Stairs is the strongest class** (mAP50 = 0.971) — visually distinct features and good data volume
-2. **Puddle detection works well** (mAP50 = 0.842) — despite puddles having low contrast against pavement
-3. **Fence Anomaly is the weakest** (mAP50 = 0.548) — only 11 validation samples; needs more annotated data
-4. **down_steps is inherently hard** (mAP50 = 0.588) — difficult to distinguish from regular stairs in images
-5. **Precision (0.824) is high** — important for a navigation assistant, as false alarms erode user trust
+| **puddle** | 0.819 | 0.777 | **0.842** | 0.478 | 399 | Good |
+| **Fence** | 0.563 | 0.702 | 0.670 | 0.352 | 84 | Moderate |
+| **Fence Anomaly** | 1.000 | 0.545 | 0.548 | 0.289 | 11 | Weak — few val samples |
+| **stairs** | 0.970 | 0.960 | **0.971** | 0.775 | 174 | Strong |
+| **up_steps** | 0.857 | 0.754 | **0.842** | 0.456 | 499 | Good |
+| **down_steps** | 0.737 | 0.503 | 0.588 | 0.226 | 206 | Harder class |
 
 ### What the Metrics Mean for Blind Navigation
 
 | Metric | Why it matters |
 |--------|---------------|
-| **High precision (82.4%)** | The system rarely reports objects that aren't there — critical for trust. A blind user won't be told to "watch out for stairs" when there are none. |
-| **Moderate recall (70.7%)** | The system misses ~30% of objects. This is the main area for improvement — a missed puddle or staircase is a safety risk. |
-| **mAP50 = 0.744** | At 50% overlap threshold, the model correctly locates and classifies ~74% of objects. Acceptable for an MVP, but should improve with more training data. |
-| **4.3 ms inference** | Fast enough for real-time use on GPU. On a laptop CPU, inference is ~20–50 ms, still well within the 3-frame skip budget. |
+| **High precision** | Fewer false spoken alerts — better trust. |
+| **Moderate recall** | Missed hazards remain the main safety gap; more data / training helps. |
+| **mAP50** | Locates and classifies many objects at IoU 0.5; not a guarantee for every deployment. |
+| **4.3 ms (GPU)** | Laptop CPU is typically ~20–50 ms per inference, still compatible with “every 3rd frame”. |
